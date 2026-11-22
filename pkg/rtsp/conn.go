@@ -44,6 +44,7 @@ type Conn struct {
 	reader    *bufio.Reader
 	sequence  int
 	session   string
+	tcpPackets  packetBuffer
 	uri       string
 
 	state   State
@@ -169,17 +170,19 @@ func (c *Conn) handleKeepalive(ctx context.Context, d time.Duration) {
 func (c *Conn) handleUDPData(channel byte) {
 	// TODO: handle timeouts and drop TCP connection after any error
 	conn := c.udpConn[channel]
+	var packets packetBuffer
 
 	for {
 		// TP-Link Tapo camera has crazy 10000 bytes packet size
-		buf := make([]byte, 10240)
+		buf := packets.reserve(10240)
 
-		n, _, err := conn.ReadFromUDP(buf)
+		n, err := conn.Read(buf)
 		if err != nil {
 			return
 		}
 
-		if err = c.handleRawPacket(channel, buf[:n]); err != nil {
+		packets = packets[n:]
+		if err = c.handleRawPacket(channel, buf[:n:n]); err != nil {
 			return
 		}
 	}
@@ -276,7 +279,8 @@ func (c *Conn) handleTCPData() error {
 	}
 
 	// init memory for data
-	buf := make([]byte, size)
+	buf := c.tcpPackets.reserve(int(size))
+	c.tcpPackets = c.tcpPackets[size:]
 	if _, err = io.ReadFull(c.reader, buf); err != nil {
 		return err
 	}
@@ -284,6 +288,17 @@ func (c *Conn) handleTCPData() error {
 	c.Recv += int(size)
 
 	return c.handleRawPacket(channel, buf)
+}
+
+// Each reader hands out disjoint slices. Queued packets may retain them after
+// the reader moves to the next block, so a consumed block is never recycled.
+type packetBuffer []byte
+
+func (b *packetBuffer) reserve(size int) []byte {
+	if len(*b) < size {
+		*b = make([]byte, max(32*1024, size))
+	}
+	return (*b)[:size:size]
 }
 
 func (c *Conn) handleRawPacket(channel byte, buf []byte) error {
