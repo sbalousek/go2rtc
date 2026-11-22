@@ -290,7 +290,7 @@ streams:
 Format: `rtsp...#{param1}#{param2}#{param3}`
 
 - Add custom timeout `#timeout=30` (in seconds)
-- Use `#read_batch=0` for minimum latency. By default, plain RTSP/TCP camera inputs can wait up to 16 ms between small reads within a video frame to reduce CPU usage.
+- Use `#read_batch=0` for minimum latency. By default, plain RTSP/TCP camera inputs can group small reads within a video frame. On Linux, a camera with at least 4 KiB missing from a video packet switches to batching within packets. Each wait is capped at 16 ms and the remaining packet length; headers and control messages use ordinary reads.
 - Ignore audio - `#media=video` or ignore video - `#media=audio` 
 - Ignore two-way audio API `#backchannel=0` - important for some glitchy cameras
 - Use WebSocket transport `#transport=ws...`

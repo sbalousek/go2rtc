@@ -142,11 +142,13 @@ func (c *Conn) Handle() (err error) {
 
 	batch := c.cameraReadBatch()
 	for c.state != StateNone {
+		var deadline time.Time
 		if !bufferedInterleaved(c.reader) {
-			_ = c.conn.SetReadDeadline(time.Now().Add(timeout))
+			deadline = time.Now().Add(timeout)
+			_ = c.conn.SetReadDeadline(deadline)
 		}
 
-		if err = c.handleTCPData(batch); err != nil {
+		if err = c.handleTCPData(batch, deadline); err != nil {
 			return
 		}
 	}
@@ -199,7 +201,7 @@ func bufferedInterleaved(r *bufio.Reader) bool {
 	return header[0] == '$' && r.Buffered()-4 >= int(binary.BigEndian.Uint16(header[2:]))
 }
 
-func (c *Conn) handleTCPData(batch *cameraReadBatch) error {
+func (c *Conn) handleTCPData(batch *cameraReadBatch, deadline time.Time) error {
 	// we can read:
 	// 1. RTP interleaved: `$` + 1B channel number + 2B size
 	// 2. RTSP response:   RTSP/1.0 200 OK
@@ -292,13 +294,21 @@ func (c *Conn) handleTCPData(batch *cameraReadBatch) error {
 	// init memory for data
 	buf := c.tcpPackets.reserve(int(size))
 	c.tcpPackets = c.tcpPackets[size:]
-	if _, err = io.ReadFull(c.reader, buf); err != nil {
+	if batch != nil && batch.readPartial != nil && batch.video[channel] && len(buf)-c.reader.Buffered() >= minBatchBytes {
+		// Once this source exhibits fragmented large packets, take headers
+		// immediately and coalesce only the missing bytes inside a packet.
+		batch.packetAware = true
+		err = batch.readPartial(c.reader, buf, deadline)
+	} else {
+		_, err = io.ReadFull(c.reader, buf)
+	}
+	if err != nil {
 		return err
 	}
 
 	c.Recv += int(size)
 
-	drained := batch != nil && c.reader.Buffered() == 0
+	drained := batch != nil && !batch.packetAware && c.reader.Buffered() == 0
 	insideFrame := drained && batch.video[channel] && len(buf) >= 2 && buf[1]&0x80 == 0
 	if err = c.handleRawPacket(channel, buf); err != nil {
 		return err
