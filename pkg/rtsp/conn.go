@@ -24,6 +24,7 @@ type Conn struct {
 	// public
 
 	Backchannel bool
+	NoReadBatch bool
 	Media       string
 	OnClose     func() error
 	PacketSize  uint16
@@ -139,12 +140,13 @@ func (c *Conn) Handle() (err error) {
 		go c.handleUDPData(byte(i))
 	}
 
+	batch := c.cameraReadBatch()
 	for c.state != StateNone {
-		ts := time.Now()
+		if !bufferedInterleaved(c.reader) {
+			_ = c.conn.SetReadDeadline(time.Now().Add(timeout))
+		}
 
-		_ = c.conn.SetReadDeadline(ts.Add(timeout))
-
-		if err = c.handleTCPData(); err != nil {
+		if err = c.handleTCPData(batch); err != nil {
 			return
 		}
 	}
@@ -188,7 +190,16 @@ func (c *Conn) handleUDPData(channel byte) {
 	}
 }
 
-func (c *Conn) handleTCPData() error {
+// A complete buffered packet can be dispatched without touching the socket timer.
+func bufferedInterleaved(r *bufio.Reader) bool {
+	if r.Buffered() < 4 {
+		return false
+	}
+	header, _ := r.Peek(4)
+	return header[0] == '$' && r.Buffered()-4 >= int(binary.BigEndian.Uint16(header[2:]))
+}
+
+func (c *Conn) handleTCPData(batch *cameraReadBatch) error {
 	// we can read:
 	// 1. RTP interleaved: `$` + 1B channel number + 2B size
 	// 2. RTSP response:   RTSP/1.0 200 OK
@@ -287,7 +298,15 @@ func (c *Conn) handleTCPData() error {
 
 	c.Recv += int(size)
 
-	return c.handleRawPacket(channel, buf)
+	drained := batch != nil && c.reader.Buffered() == 0
+	insideFrame := drained && batch.video[channel] && len(buf) >= 2 && buf[1]&0x80 == 0
+	if err = c.handleRawPacket(channel, buf); err != nil {
+		return err
+	}
+	if drained {
+		time.Sleep(batch.delay(time.Now(), c.Recv, insideFrame))
+	}
+	return nil
 }
 
 // Each reader hands out disjoint slices. Queued packets may retain them after
